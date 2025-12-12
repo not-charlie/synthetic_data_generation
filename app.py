@@ -12,6 +12,7 @@ from sklearn.metrics import (
     classification_report, confusion_matrix,
     mean_absolute_error, precision_score, recall_score, f1_score
 )
+from sklearn.model_selection import cross_val_score, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator
 import warnings
@@ -96,6 +97,12 @@ if 'plot_height' not in st.session_state:
     st.session_state.plot_height = 6
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
+if 'models' not in st.session_state:
+    st.session_state.models = {}  # Store multiple models for comparison
+if 'use_cross_validation' not in st.session_state:
+    st.session_state.use_cross_validation = False
+if 'cv_scores' not in st.session_state:
+    st.session_state.cv_scores = None
 
 # Function to generate synthetic data
 def generate_synthetic_data(dataset_type, **kwargs):
@@ -146,6 +153,9 @@ def generate_synthetic_data(dataset_type, **kwargs):
             'Seasonal': seasonal,
             'Target': y
         })
+        
+        # Extract X (features) from DataFrame (exclude 'Target' and 'Time')
+        X = df.drop(['Target', 'Time'], axis=1).values
     
     return df, X, y
 
@@ -311,6 +321,27 @@ if data_source == "Generate Synthetic Data" and st.sidebar.button("🔄 Generate
         st.session_state.model = None
         st.session_state.uploaded_file = None
     st.success("✅ Data generated successfully!")
+
+# Clear button in sidebar
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Delete Option")
+if st.sidebar.button("🗑️ Clear All Data", help="Clear all data and models"):
+    st.session_state.data_generated = False
+    st.session_state.df = None
+    st.session_state.X_train = None
+    st.session_state.X_test = None
+    st.session_state.y_train = None
+    st.session_state.y_test = None
+    st.session_state.model = None
+    st.session_state.models = {}
+    st.session_state.model_type = None
+    st.session_state.scaler = None
+    st.session_state.uploaded_file = None
+    st.session_state.cv_scores = None
+    st.session_state.use_cross_validation = False
+    st.sidebar.success("✅ All data cleared!")
+    st.rerun()
+
 
 # Main content
 if st.session_state.data_generated:
@@ -484,80 +515,240 @@ if st.session_state.data_generated:
     with tab3:
         st.header("🤖 Model Training")
         
-        # Model selection
-        if dataset_type == "Regression":
-            model_choice = st.selectbox(
-                "Select Model",
-                ["Linear Regression", "Random Forest Regressor"]
-            )
-        elif dataset_type == "Classification":
-            model_choice = st.selectbox(
-                "Select Model",
-                ["Logistic Regression", "Random Forest Classifier"]
-            )
-        else:  # Time Series
-            model_choice = st.selectbox(
-                "Select Model",
-                ["Linear Regression", "Random Forest Regressor"]
-            )
+        # Cross-validation option
+        st.subheader("⚙️ Training Options")
+        use_cv = st.checkbox("Use Cross-Validation", value=st.session_state.use_cross_validation, 
+                            help="Enable cross-validation for more robust model evaluation")
+        st.session_state.use_cross_validation = use_cv
+        
+        if use_cv:
+            cv_folds = st.slider("Number of CV Folds", 3, 10, 5, help="Number of folds for cross-validation")
+        
+        # Model comparison option
+        compare_models = st.checkbox("Compare Multiple Models", help="Train and compare multiple models side-by-side")
+        
+        if compare_models:
+            st.subheader("Select Models to Compare")
+            if dataset_type == "Regression":
+                selected_models = st.multiselect(
+                    "Choose models",
+                    ["Linear Regression", "Random Forest Regressor"],
+                    default=["Linear Regression", "Random Forest Regressor"]
+                )
+            elif dataset_type == "Classification":
+                selected_models = st.multiselect(
+                    "Choose models",
+                    ["Logistic Regression", "Random Forest Classifier"],
+                    default=["Logistic Regression", "Random Forest Classifier"]
+                )
+            else:  # Time Series
+                selected_models = st.multiselect(
+                    "Choose models",
+                    ["Linear Regression", "Random Forest Regressor"],
+                    default=["Linear Regression", "Random Forest Regressor"]
+                )
+        else:
+            # Single model selection
+            if dataset_type == "Regression":
+                model_choice = st.selectbox(
+                    "Select Model",
+                    ["Linear Regression", "Random Forest Regressor"]
+                )
+                selected_models = [model_choice]
+            elif dataset_type == "Classification":
+                model_choice = st.selectbox(
+                    "Select Model",
+                    ["Logistic Regression", "Random Forest Classifier"]
+                )
+                selected_models = [model_choice]
+            else:  # Time Series
+                model_choice = st.selectbox(
+                    "Select Model",
+                    ["Linear Regression", "Random Forest Regressor"]
+                )
+                selected_models = [model_choice]
         
         # Model hyperparameters
-        if "Random Forest" in model_choice:
+        if "Random Forest" in str(selected_models):
+            st.subheader("Random Forest Hyperparameters")
             n_estimators = st.slider("Number of Trees", 10, 500, 100, help="More trees = better performance but slower training")
             max_depth = st.slider("Max Depth", 2, 20, 10, help="Maximum depth of the trees")
         
-        if st.button("🚀 Train Model", type="primary"):
+        if st.button("🚀 Train Model(s)", type="primary"):
             # Scale features
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(st.session_state.X_train)
             X_test_scaled = scaler.transform(st.session_state.X_test)
             
-            # Train model with progress tracking for Random Forest
-            if model_choice == "Linear Regression":
-                with st.spinner("Training Linear Regression..."):
-                    model = LinearRegression()
-                    st.session_state.model_type = "regression"
-                    model.fit(X_train_scaled, st.session_state.y_train)
-                    st.session_state.model = model
-                    st.session_state.scaler = scaler
+            # Clear previous models if comparing
+            if compare_models:
+                st.session_state.models = {}
+            
+            # Train each selected model
+            for model_name in selected_models:
+                with st.spinner(f"Training {model_name}..."):
+                    if model_name == "Linear Regression":
+                        model = LinearRegression()
+                        model_type = "regression"
+                        model.fit(X_train_scaled, st.session_state.y_train)
+                        
+                    elif model_name == "Random Forest Regressor":
+                        model_type = "regression"
+                        progress_container = st.container()
+                        base_model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                        rf_model = RandomForestWithProgress(base_model, progress_container)
+                        rf_model.fit(X_train_scaled, st.session_state.y_train)
+                        model = rf_model.base_model
+                        
+                    elif model_name == "Logistic Regression":
+                        model = LogisticRegression(random_state=42, max_iter=1000)
+                        model_type = "classification"
+                        model.fit(X_train_scaled, st.session_state.y_train)
+                        
+                    else:  # Random Forest Classifier
+                        model_type = "classification"
+                        progress_container = st.container()
+                        base_model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                        rf_model = RandomForestWithProgress(base_model, progress_container)
+                        rf_model.fit(X_train_scaled, st.session_state.y_train)
+                        model = rf_model.base_model
                     
-            elif model_choice == "Random Forest Regressor":
-                st.session_state.model_type = "regression"
-                progress_container = st.container()
-                base_model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-                model = RandomForestWithProgress(base_model, progress_container)
-                model.fit(X_train_scaled, st.session_state.y_train)
-                st.session_state.model = model.base_model  # Store the actual trained model
-                st.session_state.scaler = scaler
-                
-            elif model_choice == "Logistic Regression":
-                with st.spinner("Training Logistic Regression..."):
-                    model = LogisticRegression(random_state=42, max_iter=1000)
-                    st.session_state.model_type = "classification"
-                    model.fit(X_train_scaled, st.session_state.y_train)
-                    st.session_state.model = model
-                    st.session_state.scaler = scaler
+                    # Make predictions
+                    y_train_pred = model.predict(X_train_scaled)
+                    y_test_pred = model.predict(X_test_scaled)
                     
-            else:  # Random Forest Classifier
-                st.session_state.model_type = "classification"
-                progress_container = st.container()
-                base_model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-                model = RandomForestWithProgress(base_model, progress_container)
-                model.fit(X_train_scaled, st.session_state.y_train)
-                st.session_state.model = model.base_model  # Store the actual trained model
-                st.session_state.scaler = scaler
+                    # Cross-validation if enabled
+                    cv_scores = None
+                    if use_cv:
+                        if model_type == "regression":
+                            scoring = 'neg_mean_squared_error'
+                        else:
+                            scoring = 'accuracy'
+                        cv_scores = cross_val_score(model, X_train_scaled, st.session_state.y_train, 
+                                                   cv=cv_folds, scoring=scoring)
+                    
+                    # Store model info
+                    model_info = {
+                        'model': model,
+                        'model_type': model_type,
+                        'y_train_pred': y_train_pred,
+                        'y_test_pred': y_test_pred,
+                        'cv_scores': cv_scores
+                    }
+                    st.session_state.models[model_name] = model_info
+                    
+                    # Set primary model (first one or single model)
+                    if len(st.session_state.models) == 1:
+                        st.session_state.model = model
+                        st.session_state.model_type = model_type
+                        st.session_state.scaler = scaler
+                        st.session_state.y_train_pred = y_train_pred
+                        st.session_state.y_test_pred = y_test_pred
+                        st.session_state.cv_scores = cv_scores
             
-            # Make predictions
-            y_train_pred = st.session_state.model.predict(X_train_scaled)
-            y_test_pred = st.session_state.model.predict(X_test_scaled)
-            
-            st.session_state.y_train_pred = y_train_pred
-            st.session_state.y_test_pred = y_test_pred
-            
-            st.success("✅ Model trained successfully!")
+            st.success(f"✅ {len(selected_models)} model(s) trained successfully!")
         
-        if st.session_state.model is not None:
-            st.subheader("Model Performance Metrics")
+        # Display results
+        if len(st.session_state.models) > 0:
+            # Model comparison table if multiple models
+            if compare_models and len(st.session_state.models) > 1:
+                st.subheader("📊 Model Comparison")
+                comparison_data = []
+                
+                for model_name, model_info in st.session_state.models.items():
+                    if model_info['model_type'] == "regression":
+                        train_mse = mean_squared_error(st.session_state.y_train, model_info['y_train_pred'])
+                        test_mse = mean_squared_error(st.session_state.y_test, model_info['y_test_pred'])
+                        train_r2 = r2_score(st.session_state.y_train, model_info['y_train_pred'])
+                        test_r2 = r2_score(st.session_state.y_test, model_info['y_test_pred'])
+                        train_mae = mean_absolute_error(st.session_state.y_train, model_info['y_train_pred'])
+                        test_mae = mean_absolute_error(st.session_state.y_test, model_info['y_test_pred'])
+                        
+                        comparison_data.append({
+                            'Model': model_name,
+                            'Train MSE': f"{train_mse:.4f}",
+                            'Test MSE': f"{test_mse:.4f}",
+                            'Train R²': f"{train_r2:.4f}",
+                            'Test R²': f"{test_r2:.4f}",
+                            'Train MAE': f"{train_mae:.4f}",
+                            'Test MAE': f"{test_mae:.4f}"
+                        })
+                        
+                        if model_info['cv_scores'] is not None:
+                            comparison_data[-1]['CV MSE (mean)'] = f"{-model_info['cv_scores'].mean():.4f}"
+                            comparison_data[-1]['CV MSE (std)'] = f"{model_info['cv_scores'].std():.4f}"
+                    else:  # Classification
+                        train_acc = accuracy_score(st.session_state.y_train, model_info['y_train_pred'])
+                        test_acc = accuracy_score(st.session_state.y_test, model_info['y_test_pred'])
+                        train_precision = precision_score(st.session_state.y_train, model_info['y_train_pred'], average='weighted', zero_division=0)
+                        test_precision = precision_score(st.session_state.y_test, model_info['y_test_pred'], average='weighted', zero_division=0)
+                        train_f1 = f1_score(st.session_state.y_train, model_info['y_train_pred'], average='weighted', zero_division=0)
+                        test_f1 = f1_score(st.session_state.y_test, model_info['y_test_pred'], average='weighted', zero_division=0)
+                        
+                        comparison_data.append({
+                            'Model': model_name,
+                            'Train Accuracy': f"{train_acc:.4f}",
+                            'Test Accuracy': f"{test_acc:.4f}",
+                            'Train Precision': f"{train_precision:.4f}",
+                            'Test Precision': f"{test_precision:.4f}",
+                            'Train F1': f"{train_f1:.4f}",
+                            'Test F1': f"{test_f1:.4f}"
+                        })
+                        
+                        if model_info['cv_scores'] is not None:
+                            comparison_data[-1]['CV Accuracy (mean)'] = f"{model_info['cv_scores'].mean():.4f}"
+                            comparison_data[-1]['CV Accuracy (std)'] = f"{model_info['cv_scores'].std():.4f}"
+                
+                comparison_df = pd.DataFrame(comparison_data)
+                st.dataframe(comparison_df, use_container_width=True)
+                st.markdown("---")
+            
+            # Display primary model (first model or single model)
+            primary_model_name = list(st.session_state.models.keys())[0]
+            model_info = st.session_state.models[primary_model_name]
+            st.session_state.model = model_info['model']
+            st.session_state.model_type = model_info['model_type']
+            st.session_state.y_train_pred = model_info['y_train_pred']
+            st.session_state.y_test_pred = model_info['y_test_pred']
+            st.session_state.cv_scores = model_info['cv_scores']
+            
+            st.subheader(f"Model Performance Metrics - {primary_model_name}")
+            
+            # Cross-validation results
+            if use_cv and st.session_state.cv_scores is not None:
+                st.subheader("📈 Cross-Validation Results")
+                cv_mean = st.session_state.cv_scores.mean()
+                cv_std = st.session_state.cv_scores.std()
+                
+                if st.session_state.model_type == "regression":
+                    st.metric("CV MSE (mean)", f"{-cv_mean:.4f}", help="Mean squared error across CV folds")
+                    st.metric("CV MSE (std)", f"{cv_std:.4f}", help="Standard deviation of MSE across CV folds")
+                    st.metric("CV RMSE (mean)", f"{np.sqrt(-cv_mean):.4f}", help="Root mean squared error")
+                else:
+                    st.metric("CV Accuracy (mean)", f"{cv_mean:.4f}", help="Mean accuracy across CV folds")
+                    st.metric("CV Accuracy (std)", f"{cv_std:.4f}", help="Standard deviation of accuracy across CV folds")
+                
+                # CV scores visualization
+                fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
+                fold_numbers = range(1, len(st.session_state.cv_scores) + 1)
+                if st.session_state.model_type == "regression":
+                    scores_to_plot = -st.session_state.cv_scores  # Convert to positive MSE
+                    ax.plot(fold_numbers, scores_to_plot, 'o-', linewidth=2, markersize=8)
+                    ax.axhline(y=-cv_mean, color='r', linestyle='--', label=f'Mean: {-cv_mean:.4f}')
+                    ax.set_ylabel('MSE')
+                    ax.set_title('Cross-Validation MSE by Fold')
+                else:
+                    ax.plot(fold_numbers, st.session_state.cv_scores, 'o-', linewidth=2, markersize=8)
+                    ax.axhline(y=cv_mean, color='r', linestyle='--', label=f'Mean: {cv_mean:.4f}')
+                    ax.set_ylabel('Accuracy')
+                    ax.set_title('Cross-Validation Accuracy by Fold')
+                ax.set_xlabel('Fold')
+                ax.set_xticks(fold_numbers)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig)
+                st.markdown("---")
             
             if st.session_state.model_type == "regression":
                 train_mse = mean_squared_error(st.session_state.y_train, st.session_state.y_train_pred)
@@ -615,6 +806,39 @@ if st.session_state.data_generated:
                 plt.tight_layout()
                 st.pyplot(fig)
                 
+                # Feature importance for tree-based models
+                if "Random Forest" in primary_model_name:
+                    st.subheader("📊 Feature Importance")
+                    try:
+                        feature_importance = st.session_state.model.feature_importances_
+                        # Get feature names
+                        if data_source == "Upload CSV File":
+                            feature_names_list = [col for col in st.session_state.df.columns if col != 'Target']
+                        elif dataset_type == "Time Series":
+                            feature_names_list = ['Lag_1', 'Lag_2', 'Lag_3', 'Trend', 'Seasonal']
+                        else:
+                            feature_names_list = [f'Feature_{i+1}' for i in range(len(feature_importance))]
+                        
+                        # Create feature importance DataFrame
+                        importance_df = pd.DataFrame({
+                            'Feature': feature_names_list,
+                            'Importance': feature_importance
+                        }).sort_values('Importance', ascending=False)
+                        
+                        # Plot feature importance
+                        fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
+                        ax.barh(importance_df['Feature'], importance_df['Importance'])
+                        ax.set_xlabel('Importance')
+                        ax.set_title('Feature Importance')
+                        ax.grid(True, alpha=0.3, axis='x')
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        
+                        # Display as table
+                        st.dataframe(importance_df, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not display feature importance: {str(e)}")
+                
             else:  # Classification
                 train_acc = accuracy_score(st.session_state.y_train, st.session_state.y_train_pred)
                 test_acc = accuracy_score(st.session_state.y_test, st.session_state.y_test_pred)
@@ -658,6 +882,39 @@ if st.session_state.data_generated:
                 report = classification_report(st.session_state.y_test, st.session_state.y_test_pred, output_dict=True)
                 report_df = pd.DataFrame(report).transpose()
                 st.dataframe(report_df, use_container_width=True)
+                
+                # Feature importance for tree-based models
+                if "Random Forest" in primary_model_name:
+                    st.subheader("📊 Feature Importance")
+                    try:
+                        feature_importance = st.session_state.model.feature_importances_
+                        # Get feature names
+                        if data_source == "Upload CSV File":
+                            feature_names_list = [col for col in st.session_state.df.columns if col != 'Target']
+                        elif dataset_type == "Time Series":
+                            feature_names_list = ['Lag_1', 'Lag_2', 'Lag_3', 'Trend', 'Seasonal']
+                        else:
+                            feature_names_list = [f'Feature_{i+1}' for i in range(len(feature_importance))]
+                        
+                        # Create feature importance DataFrame
+                        importance_df = pd.DataFrame({
+                            'Feature': feature_names_list,
+                            'Importance': feature_importance
+                        }).sort_values('Importance', ascending=False)
+                        
+                        # Plot feature importance
+                        fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
+                        ax.barh(importance_df['Feature'], importance_df['Importance'])
+                        ax.set_xlabel('Importance')
+                        ax.set_title('Feature Importance')
+                        ax.grid(True, alpha=0.3, axis='x')
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        
+                        # Display as table
+                        st.dataframe(importance_df, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not display feature importance: {str(e)}")
     
     with tab4:
         st.header("🎯 Simulation & Evaluation")
