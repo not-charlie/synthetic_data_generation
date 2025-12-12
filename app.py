@@ -9,7 +9,8 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, 
-    classification_report, confusion_matrix
+    classification_report, confusion_matrix,
+    mean_absolute_error, precision_score, recall_score, f1_score
 )
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator
@@ -30,11 +31,24 @@ st.markdown("---")
 # Sidebar for configuration
 st.sidebar.header("⚙️ Configuration")
 
-# Dataset type selection
-dataset_type = st.sidebar.selectbox(
-    "Select Dataset Type",
-    ["Regression", "Classification", "Time Series"]
+# Data source selection
+data_source = st.sidebar.radio(
+    "Data Source",
+    ["Generate Synthetic Data", "Upload CSV File"]
 )
+
+# Dataset type selection
+if data_source == "Generate Synthetic Data":
+    dataset_type = st.sidebar.selectbox(
+        "Select Dataset Type",
+        ["Regression", "Classification", "Time Series"]
+    )
+else:
+    dataset_type = st.sidebar.selectbox(
+        "Select Dataset Type (for uploaded data)",
+        ["Regression", "Classification", "Time Series"],
+        help="Select the type of problem your uploaded data represents"
+    )
 
 # Parameters based on dataset type
 if dataset_type == "Regression":
@@ -76,6 +90,12 @@ if 'model_type' not in st.session_state:
     st.session_state.model_type = None
 if 'scaler' not in st.session_state:
     st.session_state.scaler = None
+if 'plot_width' not in st.session_state:
+    st.session_state.plot_width = 10
+if 'plot_height' not in st.session_state:
+    st.session_state.plot_height = 6
+if 'uploaded_file' not in st.session_state:
+    st.session_state.uploaded_file = None
 
 # Function to generate synthetic data
 def generate_synthetic_data(dataset_type, **kwargs):
@@ -175,8 +195,73 @@ class RandomForestWithProgress(BaseEstimator):
         # Delegate all other attributes to base_model
         return getattr(self.base_model, name)
 
+# CSV Upload Section
+if data_source == "Upload CSV File":
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📤 Upload CSV File")
+    uploaded_file = st.sidebar.file_uploader(
+        "Choose a CSV file",
+        type=['csv'],
+        help="Upload a CSV file with features and a target column"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            df_uploaded = pd.read_csv(uploaded_file)
+            st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
+            st.sidebar.info(f"Shape: {df_uploaded.shape[0]} rows × {df_uploaded.shape[1]} columns")
+            
+            # Let user select target column
+            target_column = st.sidebar.selectbox(
+                "Select Target Column",
+                df_uploaded.columns.tolist(),
+                help="Select the column that contains your target variable"
+            )
+            
+            # Get feature columns (all except target)
+            feature_columns = [col for col in df_uploaded.columns if col != target_column]
+            
+            if len(feature_columns) == 0:
+                st.sidebar.error("❌ No feature columns found. Please ensure your CSV has at least one feature column.")
+            else:
+                if st.sidebar.button("📊 Load Uploaded Data", type="primary"):
+                    # Prepare data
+                    X = df_uploaded[feature_columns].values
+                    y = df_uploaded[target_column].values
+                    
+                    # Create DataFrame with consistent structure
+                    df_processed = df_uploaded.copy()
+                    # Rename target column to 'Target' for consistency
+                    df_processed = df_processed.rename(columns={target_column: 'Target'})
+                    
+                    # Split data
+                    if dataset_type == "Time Series":
+                        # For time series, use first 80% for training
+                        split_idx = int(0.8 * len(X))
+                        st.session_state.X_train = X[:split_idx]
+                        st.session_state.X_test = X[split_idx:]
+                        st.session_state.y_train = y[:split_idx]
+                        st.session_state.y_test = y[split_idx:]
+                    else:
+                        X_train, X_test, y_train, y_test = train_test_split(
+                            X, y, test_size=0.2, random_state=42
+                        )
+                        st.session_state.X_train = X_train
+                        st.session_state.X_test = X_test
+                        st.session_state.y_train = y_train
+                        st.session_state.y_test = y_test
+                    
+                    st.session_state.df = df_processed
+                    st.session_state.data_generated = True
+                    st.session_state.model = None
+                    st.session_state.uploaded_file = uploaded_file.name
+                    st.sidebar.success("✅ Data loaded successfully!")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error reading file: {str(e)}")
+            st.sidebar.info("Please ensure your CSV file is properly formatted.")
+
 # Generate Data Button
-if st.sidebar.button("🔄 Generate Synthetic Data", type="primary"):
+if data_source == "Generate Synthetic Data" and st.sidebar.button("🔄 Generate Synthetic Data", type="primary"):
     with st.spinner("Generating synthetic data..."):
         if dataset_type == "Regression":
             st.session_state.df, X, y = generate_synthetic_data(
@@ -224,6 +309,7 @@ if st.sidebar.button("🔄 Generate Synthetic Data", type="primary"):
         
         st.session_state.data_generated = True
         st.session_state.model = None
+        st.session_state.uploaded_file = None
     st.success("✅ Data generated successfully!")
 
 # Main content
@@ -273,8 +359,11 @@ if st.session_state.data_generated:
         # Also provide download for train/test splits
         col1, col2 = st.columns(2)
         with col1:
-            # Get feature names based on dataset type
-            if dataset_type == "Time Series":
+            # Get feature names based on dataset type and data source
+            if data_source == "Upload CSV File":
+                # Use original feature column names from uploaded data
+                feature_names = [col for col in st.session_state.df.columns if col != 'Target']
+            elif dataset_type == "Time Series":
                 feature_names = ['Lag_1', 'Lag_2', 'Lag_3', 'Trend', 'Seasonal']
             else:
                 feature_names = [f'Feature_{i+1}' for i in range(st.session_state.X_train.shape[1])]
@@ -302,9 +391,21 @@ if st.session_state.data_generated:
     with tab2:
         st.header("🔍 Exploratory Data Analysis")
         
+        # Plot size controls
+        st.subheader("📐 Plot Size Controls")
+        col1, col2 = st.columns(2)
+        with col1:
+            plot_width = st.slider("Plot Width", 5, 20, st.session_state.plot_width, help="Adjust the width of plots")
+            st.session_state.plot_width = plot_width
+        with col2:
+            plot_height = st.slider("Plot Height", 3, 15, st.session_state.plot_height, help="Adjust the height of plots")
+            st.session_state.plot_height = plot_height
+        
+        st.markdown("---")
+        
         # Distribution plots
         st.subheader("Target Variable Distribution")
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
         if dataset_type == "Classification":
             st.session_state.df['Target'].value_counts().plot(kind='bar', ax=ax)
             ax.set_xlabel('Class')
@@ -321,7 +422,7 @@ if st.session_state.data_generated:
         st.subheader("Correlation Matrix")
         numeric_cols = st.session_state.df.select_dtypes(include=[np.number]).columns
         corr_matrix = st.session_state.df[numeric_cols].corr()
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_width))
         sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', center=0, ax=ax)
         ax.set_title('Correlation Matrix')
         st.pyplot(fig)
@@ -333,7 +434,7 @@ if st.session_state.data_generated:
         n_cols = 3
         n_rows = (n_features + n_cols - 1) // n_cols
         
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(st.session_state.plot_width * n_cols, st.session_state.plot_height * n_rows))
         axes = axes.flatten() if n_features > 1 else [axes]
         
         for i, col in enumerate(feature_cols):
@@ -354,7 +455,7 @@ if st.session_state.data_generated:
             st.subheader("Feature vs Target Relationships")
             n_cols = 3
             n_rows = (n_features + n_cols - 1) // n_cols
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(st.session_state.plot_width * n_cols, st.session_state.plot_height * n_rows))
             axes = axes.flatten() if n_features > 1 else [axes]
             
             for i, col in enumerate(feature_cols):
@@ -372,7 +473,7 @@ if st.session_state.data_generated:
         # Time series plot
         if dataset_type == "Time Series":
             st.subheader("Time Series Plot")
-            fig, ax = plt.subplots(figsize=(12, 6))
+            fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
             ax.plot(st.session_state.df['Time'], st.session_state.df['Target'], linewidth=2)
             ax.set_xlabel('Time')
             ax.set_ylabel('Target Value')
@@ -474,9 +575,26 @@ if st.session_state.data_generated:
                 with col4:
                     st.metric("Test R²", f"{test_r2:.4f}")
                 
+                # Additional metrics
+                train_mae = mean_absolute_error(st.session_state.y_train, st.session_state.y_train_pred)
+                test_mae = mean_absolute_error(st.session_state.y_test, st.session_state.y_test_pred)
+                train_rmse = np.sqrt(train_mse)
+                test_rmse = np.sqrt(test_mse)
+                
+                st.subheader("Additional Regression Metrics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Train MAE", f"{train_mae:.4f}")
+                with col2:
+                    st.metric("Test MAE", f"{test_mae:.4f}")
+                with col3:
+                    st.metric("Train RMSE", f"{train_rmse:.4f}")
+                with col4:
+                    st.metric("Test RMSE", f"{test_rmse:.4f}")
+                
                 # Prediction vs Actual plots
                 st.subheader("Prediction vs Actual")
-                fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+                fig, axes = plt.subplots(1, 2, figsize=(st.session_state.plot_width * 1.5, st.session_state.plot_height))
                 
                 axes[0].scatter(st.session_state.y_train, st.session_state.y_train_pred, alpha=0.5)
                 axes[0].plot([st.session_state.y_train.min(), st.session_state.y_train.max()],
@@ -501,16 +619,34 @@ if st.session_state.data_generated:
                 train_acc = accuracy_score(st.session_state.y_train, st.session_state.y_train_pred)
                 test_acc = accuracy_score(st.session_state.y_test, st.session_state.y_test_pred)
                 
+                # Calculate precision, recall, F1 (handle multi-class with average='weighted')
+                try:
+                    train_precision = precision_score(st.session_state.y_train, st.session_state.y_train_pred, average='weighted', zero_division=0)
+                    test_precision = precision_score(st.session_state.y_test, st.session_state.y_test_pred, average='weighted', zero_division=0)
+                    train_recall = recall_score(st.session_state.y_train, st.session_state.y_train_pred, average='weighted', zero_division=0)
+                    test_recall = recall_score(st.session_state.y_test, st.session_state.y_test_pred, average='weighted', zero_division=0)
+                    train_f1 = f1_score(st.session_state.y_train, st.session_state.y_train_pred, average='weighted', zero_division=0)
+                    test_f1 = f1_score(st.session_state.y_test, st.session_state.y_test_pred, average='weighted', zero_division=0)
+                except:
+                    train_precision = test_precision = train_recall = test_recall = train_f1 = test_f1 = 0.0
+                
+                st.subheader("Classification Metrics")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric("Train Accuracy", f"{train_acc:.4f}")
+                    st.metric("Train Precision", f"{train_precision:.4f}")
+                    st.metric("Train Recall", f"{train_recall:.4f}")
+                    st.metric("Train F1-Score", f"{train_f1:.4f}")
                 with col2:
                     st.metric("Test Accuracy", f"{test_acc:.4f}")
+                    st.metric("Test Precision", f"{test_precision:.4f}")
+                    st.metric("Test Recall", f"{test_recall:.4f}")
+                    st.metric("Test F1-Score", f"{test_f1:.4f}")
                 
                 # Confusion matrix
                 st.subheader("Confusion Matrix")
                 cm = confusion_matrix(st.session_state.y_test, st.session_state.y_test_pred)
-                fig, ax = plt.subplots(figsize=(8, 6))
+                fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
                 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
                 ax.set_xlabel('Predicted')
                 ax.set_ylabel('Actual')
@@ -536,7 +672,13 @@ if st.session_state.data_generated:
             if st.button("🎲 Generate Simulations", type="primary"):
                 with st.spinner("Generating simulations..."):
                     # Generate new synthetic data with same properties
-                    if dataset_type == "Regression":
+                    if data_source == "Upload CSV File":
+                        # For uploaded data, use bootstrap sampling from training data
+                        np.random.seed(42)
+                        indices = np.random.choice(len(st.session_state.X_train), size=n_simulations, replace=True)
+                        X_sim = st.session_state.X_train[indices]
+                        y_sim = st.session_state.y_train[indices]
+                    elif dataset_type == "Regression":
                         X_sim, y_sim = make_regression(
                             n_samples=n_simulations,
                             n_features=st.session_state.X_train.shape[1],
@@ -581,7 +723,7 @@ if st.session_state.data_generated:
                 st.subheader("Simulation Results")
                 
                 # Compare distributions
-                fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+                fig, axes = plt.subplots(1, 2, figsize=(st.session_state.plot_width * 1.5, st.session_state.plot_height))
                 
                 if st.session_state.model_type == "regression":
                     axes[0].hist(st.session_state.y_sim, bins=30, alpha=0.7, label='Actual', edgecolor='black')
@@ -603,12 +745,18 @@ if st.session_state.data_generated:
                     # Evaluation metrics
                     sim_mse = mean_squared_error(st.session_state.y_sim, st.session_state.y_sim_pred)
                     sim_r2 = r2_score(st.session_state.y_sim, st.session_state.y_sim_pred)
+                    sim_mae = mean_absolute_error(st.session_state.y_sim, st.session_state.y_sim_pred)
+                    sim_rmse = np.sqrt(sim_mse)
                     
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Simulation MSE", f"{sim_mse:.4f}")
                     with col2:
                         st.metric("Simulation R²", f"{sim_r2:.4f}")
+                    with col3:
+                        st.metric("Simulation MAE", f"{sim_mae:.4f}")
+                    with col4:
+                        st.metric("Simulation RMSE", f"{sim_rmse:.4f}")
                     
                 else:  # Classification
                     axes[0].bar(['Actual', 'Simulated'], 
@@ -659,5 +807,8 @@ if st.session_state.data_generated:
                     st.dataframe(comparison_df, use_container_width=True)
 
 else:
-    st.info("👈 Please configure the parameters in the sidebar and click 'Generate Synthetic Data' to get started!")
+    if data_source == "Upload CSV File":
+        st.info("👈 Please upload a CSV file in the sidebar and select your target column to get started!")
+    else:
+        st.info("👈 Please configure the parameters in the sidebar and click 'Generate Synthetic Data' to get started!")
 
