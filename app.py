@@ -12,6 +12,7 @@ from sklearn.metrics import (
     classification_report, confusion_matrix
 )
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import BaseEstimator
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -73,6 +74,8 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'model_type' not in st.session_state:
     st.session_state.model_type = None
+if 'scaler' not in st.session_state:
+    st.session_state.scaler = None
 
 # Function to generate synthetic data
 def generate_synthetic_data(dataset_type, **kwargs):
@@ -125,6 +128,52 @@ def generate_synthetic_data(dataset_type, **kwargs):
         })
     
     return df, X, y
+
+# Custom Random Forest wrapper with progress tracking
+class RandomForestWithProgress(BaseEstimator):
+    def __init__(self, base_model, progress_container):
+        self.base_model = base_model
+        self.progress_container = progress_container
+        self.n_estimators = base_model.n_estimators
+        
+    def fit(self, X, y):
+        progress_bar = self.progress_container.progress(0)
+        status_text = self.progress_container.empty()
+        
+        # Use warm_start for efficient incremental training
+        batch_size = max(1, self.n_estimators // 20)  # Update progress ~20 times
+        
+        # Create model with warm_start enabled
+        model_class = type(self.base_model)
+        temp_model = model_class(
+            n_estimators=batch_size,
+            random_state=self.base_model.random_state,
+            max_depth=getattr(self.base_model, 'max_depth', None),
+            max_features=getattr(self.base_model, 'max_features', 'sqrt'),
+            warm_start=True  # Enable incremental training
+        )
+        
+        # Train incrementally in batches
+        for batch_end in range(batch_size, self.n_estimators + 1, batch_size):
+            batch_end = min(batch_end, self.n_estimators)
+            temp_model.n_estimators = batch_end
+            temp_model.fit(X, y)
+            
+            # Update progress
+            progress = batch_end / self.n_estimators
+            progress_bar.progress(progress)
+            status_text.text(f"Training trees: {batch_end}/{self.n_estimators} ({progress*100:.1f}%)")
+        
+        self.base_model = temp_model
+        status_text.text(f"✅ Training complete! ({self.n_estimators} trees)")
+        return self
+    
+    def predict(self, X):
+        return self.base_model.predict(X)
+    
+    def __getattr__(self, name):
+        # Delegate all other attributes to base_model
+        return getattr(self.base_model, name)
 
 # Generate Data Button
 if st.sidebar.button("🔄 Generate Synthetic Data", type="primary"):
@@ -209,6 +258,46 @@ if st.session_state.data_generated:
             'Null Count': st.session_state.df.isnull().sum()
         })
         st.dataframe(info_df, use_container_width=True)
+        
+        # Download CSV button
+        st.subheader("📥 Download Dataset")
+        csv = st.session_state.df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Dataset as CSV",
+            data=csv,
+            file_name=f"synthetic_{dataset_type.lower()}_dataset.csv",
+            mime="text/csv",
+            type="primary"
+        )
+        
+        # Also provide download for train/test splits
+        col1, col2 = st.columns(2)
+        with col1:
+            # Get feature names based on dataset type
+            if dataset_type == "Time Series":
+                feature_names = ['Lag_1', 'Lag_2', 'Lag_3', 'Trend', 'Seasonal']
+            else:
+                feature_names = [f'Feature_{i+1}' for i in range(st.session_state.X_train.shape[1])]
+            
+            train_df = pd.DataFrame(st.session_state.X_train, columns=feature_names)
+            train_df['Target'] = st.session_state.y_train
+            train_csv = train_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Training Set (CSV)",
+                data=train_csv,
+                file_name=f"train_{dataset_type.lower().replace(' ', '_')}_dataset.csv",
+                mime="text/csv"
+            )
+        with col2:
+            test_df = pd.DataFrame(st.session_state.X_test, columns=feature_names)
+            test_df['Target'] = st.session_state.y_test
+            test_csv = test_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Test Set (CSV)",
+                data=test_csv,
+                file_name=f"test_{dataset_type.lower().replace(' ', '_')}_dataset.csv",
+                mime="text/csv"
+            )
     
     with tab2:
         st.header("🔍 Exploratory Data Analysis")
@@ -311,42 +400,59 @@ if st.session_state.data_generated:
                 ["Linear Regression", "Random Forest Regressor"]
             )
         
+        # Model hyperparameters
+        if "Random Forest" in model_choice:
+            n_estimators = st.slider("Number of Trees", 10, 500, 100, help="More trees = better performance but slower training")
+            max_depth = st.slider("Max Depth", 2, 20, 10, help="Maximum depth of the trees")
+        
         if st.button("🚀 Train Model", type="primary"):
-            with st.spinner("Training model..."):
-                # Scale features
-                scaler = StandardScaler()
-                X_train_scaled = scaler.fit_transform(st.session_state.X_train)
-                X_test_scaled = scaler.transform(st.session_state.X_test)
-                
-                # Train model
-                if model_choice == "Linear Regression":
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(st.session_state.X_train)
+            X_test_scaled = scaler.transform(st.session_state.X_test)
+            
+            # Train model with progress tracking for Random Forest
+            if model_choice == "Linear Regression":
+                with st.spinner("Training Linear Regression..."):
                     model = LinearRegression()
                     st.session_state.model_type = "regression"
-                elif model_choice == "Random Forest Regressor":
-                    model = RandomForestRegressor(n_estimators=100, random_state=42)
-                    st.session_state.model_type = "regression"
-                elif model_choice == "Logistic Regression":
-                    model = LogisticRegression(random_state=42, max_iter=1000)
-                    st.session_state.model_type = "classification"
-                else:  # Random Forest Classifier
-                    model = RandomForestClassifier(n_estimators=100, random_state=42)
-                    st.session_state.model_type = "classification"
-                
-                if dataset_type == "Time Series":
                     model.fit(X_train_scaled, st.session_state.y_train)
-                else:
-                    model.fit(X_train_scaled, st.session_state.y_train)
-                
-                st.session_state.model = model
+                    st.session_state.model = model
+                    st.session_state.scaler = scaler
+                    
+            elif model_choice == "Random Forest Regressor":
+                st.session_state.model_type = "regression"
+                progress_container = st.container()
+                base_model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                model = RandomForestWithProgress(base_model, progress_container)
+                model.fit(X_train_scaled, st.session_state.y_train)
+                st.session_state.model = model.base_model  # Store the actual trained model
                 st.session_state.scaler = scaler
                 
-                # Make predictions
-                y_train_pred = model.predict(X_train_scaled)
-                y_test_pred = model.predict(X_test_scaled)
-                
-                st.session_state.y_train_pred = y_train_pred
-                st.session_state.y_test_pred = y_test_pred
-                
+            elif model_choice == "Logistic Regression":
+                with st.spinner("Training Logistic Regression..."):
+                    model = LogisticRegression(random_state=42, max_iter=1000)
+                    st.session_state.model_type = "classification"
+                    model.fit(X_train_scaled, st.session_state.y_train)
+                    st.session_state.model = model
+                    st.session_state.scaler = scaler
+                    
+            else:  # Random Forest Classifier
+                st.session_state.model_type = "classification"
+                progress_container = st.container()
+                base_model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                model = RandomForestWithProgress(base_model, progress_container)
+                model.fit(X_train_scaled, st.session_state.y_train)
+                st.session_state.model = model.base_model  # Store the actual trained model
+                st.session_state.scaler = scaler
+            
+            # Make predictions
+            y_train_pred = st.session_state.model.predict(X_train_scaled)
+            y_test_pred = st.session_state.model.predict(X_test_scaled)
+            
+            st.session_state.y_train_pred = y_train_pred
+            st.session_state.y_test_pred = y_test_pred
+            
             st.success("✅ Model trained successfully!")
         
         if st.session_state.model is not None:
