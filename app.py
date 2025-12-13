@@ -15,22 +15,55 @@ from sklearn.metrics import (
 from sklearn.model_selection import cross_val_score, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator
+from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
+
+# Helper function for metric explanations
+def get_metric_explanation(metric_name, model_type="regression"):
+    """Return explanation for a given metric."""
+    explanations = {
+        "regression": {
+            "MSE": "Mean Squared Error: Average of squared differences between predicted and actual values. Lower is better.",
+            "RMSE": "Root Mean Squared Error: Square root of MSE, in same units as target. Lower is better.",
+            "MAE": "Mean Absolute Error: Average absolute difference between predicted and actual values. Lower is better.",
+            "R²": "R-squared: Proportion of variance explained by the model. Range: 0-1, higher is better.",
+            "CV MSE": "Cross-Validation MSE: Average MSE across all CV folds. More robust than single train/test split.",
+            "CV RMSE": "Cross-Validation RMSE: Square root of CV MSE, in same units as target."
+        },
+        "classification": {
+            "Accuracy": "Accuracy: Proportion of correct predictions. Range: 0-1, higher is better.",
+            "Precision": "Precision: Proportion of positive predictions that are correct. Higher is better.",
+            "Recall": "Recall: Proportion of actual positives correctly identified. Higher is better.",
+            "F1-Score": "F1-Score: Harmonic mean of precision and recall. Balances both metrics. Higher is better.",
+            "CV Accuracy": "Cross-Validation Accuracy: Average accuracy across all CV folds. More robust evaluation."
+        }
+    }
+    return explanations.get(model_type, {}).get(metric_name, "No explanation available.")
+
+# Helper function to detect outliers using IQR method
+def detect_outliers_iqr(data, column):
+    """Detect outliers using Interquartile Range method."""
+    Q1 = data[column].quantile(0.25)
+    Q3 = data[column].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    outliers = data[(data[column] < lower_bound) | (data[column] > upper_bound)]
+    return outliers, lower_bound, upper_bound
 
 # Set page config
 st.set_page_config(
     page_title="Synthetic Data Modeling & Simulation",
-    page_icon="📊",
     layout="wide"
 )
 
 # Title
-st.title("📊 Synthetic Data Modeling & Simulation")
+st.title(" Synthetic Data Modeling & Simulation")
 st.markdown("---")
 
 # Sidebar for configuration
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.header(" Configuration")
 
 # Data source selection
 data_source = st.sidebar.radio(
@@ -53,24 +86,38 @@ else:
 
 # Parameters based on dataset type
 if dataset_type == "Regression":
-    n_samples = st.sidebar.slider("Number of Samples", 100, 5000, 1000)
-    n_features = st.sidebar.slider("Number of Features", 2, 10, 5)
-    noise = st.sidebar.slider("Noise Level", 0.0, 50.0, 10.0)
-    random_state = st.sidebar.slider("Random State", 0, 100, 42)
+    n_samples = st.sidebar.slider("Number of Samples", 100, 5000, 1000, 
+                                  help="Total number of data points to generate. More samples = better model training but slower processing.")
+    n_features = st.sidebar.slider("Number of Features", 2, 10, 5,
+                                  help="Number of input features (predictors). More features = more complex relationships to model.")
+    noise = st.sidebar.slider("Noise Level", 0.0, 50.0, 10.0,
+                              help="Amount of random noise added to the target. Higher noise = harder to predict accurately.")
+    random_state = st.sidebar.slider("Random State", 0, 100, 42,
+                                     help="Seed for random number generator. Same seed = reproducible results.")
     
 elif dataset_type == "Classification":
-    n_samples = st.sidebar.slider("Number of Samples", 100, 5000, 1000)
-    n_features = st.sidebar.slider("Number of Features", 2, 10, 5)
-    n_classes = st.sidebar.slider("Number of Classes", 2, 5, 2)
-    n_informative = st.sidebar.slider("Informative Features", 2, n_features, min(3, n_features))
-    random_state = st.sidebar.slider("Random State", 0, 100, 42)
+    n_samples = st.sidebar.slider("Number of Samples", 100, 5000, 1000,
+                                 help="Total number of data points to generate. More samples = better model training but slower processing.")
+    n_features = st.sidebar.slider("Number of Features", 2, 10, 5,
+                                  help="Number of input features (predictors). More features = more complex relationships to model.")
+    n_classes = st.sidebar.slider("Number of Classes", 2, 5, 2,
+                                 help="Number of distinct classes in the target variable. Binary (2) or multi-class classification.")
+    n_informative = st.sidebar.slider("Informative Features", 2, n_features, min(3, n_features),
+                                     help="Number of features that are actually useful for classification. Higher = easier to classify.")
+    random_state = st.sidebar.slider("Random State", 0, 100, 42,
+                                     help="Seed for random number generator. Same seed = reproducible results.")
     
 else:  # Time Series
-    n_samples = st.sidebar.slider("Number of Time Points", 100, 1000, 200)
-    trend_strength = st.sidebar.slider("Trend Strength", 0.0, 2.0, 0.5)
-    seasonal_strength = st.sidebar.slider("Seasonal Strength", 0.0, 2.0, 1.0)
-    noise_level = st.sidebar.slider("Noise Level", 0.0, 1.0, 0.1)
-    random_state = st.sidebar.slider("Random State", 0, 100, 42)
+    n_samples = st.sidebar.slider("Number of Time Points", 100, 1000, 200,
+                                 help="Length of the time series. More points = longer time period to analyze.")
+    trend_strength = st.sidebar.slider("Trend Strength", 0.0, 2.0, 0.5,
+                                       help="Strength of the linear trend component. Higher = stronger upward/downward trend.")
+    seasonal_strength = st.sidebar.slider("Seasonal Strength", 0.0, 2.0, 1.0,
+                                         help="Strength of seasonal patterns (repeating cycles). Higher = more pronounced seasonality.")
+    noise_level = st.sidebar.slider("Noise Level", 0.0, 1.0, 0.1,
+                                   help="Amount of random variation. Higher noise = less predictable patterns.")
+    random_state = st.sidebar.slider("Random State", 0, 100, 42,
+                                     help="Seed for random number generator. Same seed = reproducible results.")
 
 # Initialize session state
 if 'data_generated' not in st.session_state:
@@ -208,7 +255,7 @@ class RandomForestWithProgress(BaseEstimator):
 # CSV Upload Section
 if data_source == "Upload CSV File":
     st.sidebar.markdown("---")
-    st.sidebar.subheader("📤 Upload CSV File")
+    st.sidebar.subheader("Upload CSV File")
     uploaded_file = st.sidebar.file_uploader(
         "Choose a CSV file",
         type=['csv'],
@@ -217,61 +264,129 @@ if data_source == "Upload CSV File":
     
     if uploaded_file is not None:
         try:
-            df_uploaded = pd.read_csv(uploaded_file)
-            st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
-            st.sidebar.info(f"Shape: {df_uploaded.shape[0]} rows × {df_uploaded.shape[1]} columns")
+            # Validate file size
+            uploaded_file.seek(0, 2)  # Seek to end
+            file_size = uploaded_file.tell()
+            uploaded_file.seek(0)  # Reset to beginning
             
-            # Let user select target column
-            target_column = st.sidebar.selectbox(
-                "Select Target Column",
-                df_uploaded.columns.tolist(),
-                help="Select the column that contains your target variable"
-            )
-            
-            # Get feature columns (all except target)
-            feature_columns = [col for col in df_uploaded.columns if col != target_column]
-            
-            if len(feature_columns) == 0:
-                st.sidebar.error("❌ No feature columns found. Please ensure your CSV has at least one feature column.")
+            if file_size > 50 * 1024 * 1024:  # 50MB limit
+                st.sidebar.error("❌ File too large! Maximum file size is 50MB. Please upload a smaller file.")
+            elif file_size == 0:
+                st.sidebar.error("❌ File is empty! Please upload a valid CSV file with data.")
             else:
-                if st.sidebar.button("📊 Load Uploaded Data", type="primary"):
-                    # Prepare data
-                    X = df_uploaded[feature_columns].values
-                    y = df_uploaded[target_column].values
+                df_uploaded = pd.read_csv(uploaded_file)
+                
+                # Validate DataFrame
+                if df_uploaded.empty:
+                    st.sidebar.error("❌ CSV file is empty! Please ensure your file contains data rows.")
+                elif len(df_uploaded.columns) < 2:
+                    st.sidebar.error("❌ CSV file must have at least 2 columns (one feature + one target). Current file has only {len(df_uploaded.columns)} column(s).")
+                elif len(df_uploaded) < 10:
+                    st.sidebar.warning(f"⚠️ Warning: Dataset has only {len(df_uploaded)} rows. For reliable model training, at least 20-30 samples are recommended.")
+                else:
+                    st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
+                    st.sidebar.info(f"Shape: {df_uploaded.shape[0]} rows × {df_uploaded.shape[1]} columns")
                     
-                    # Create DataFrame with consistent structure
-                    df_processed = df_uploaded.copy()
-                    # Rename target column to 'Target' for consistency
-                    df_processed = df_processed.rename(columns={target_column: 'Target'})
+                    # Check for missing values
+                    missing_counts = df_uploaded.isnull().sum()
+                    if missing_counts.sum() > 0:
+                        missing_cols = missing_counts[missing_counts > 0]
+                        st.sidebar.warning(f"⚠️ Warning: Found missing values in {len(missing_cols)} column(s): {', '.join(missing_cols.index[:3].tolist())}{'...' if len(missing_cols) > 3 else ''}. Missing values will be handled automatically.")
                     
-                    # Split data
-                    if dataset_type == "Time Series":
-                        # For time series, use first 80% for training
-                        split_idx = int(0.8 * len(X))
-                        st.session_state.X_train = X[:split_idx]
-                        st.session_state.X_test = X[split_idx:]
-                        st.session_state.y_train = y[:split_idx]
-                        st.session_state.y_test = y[split_idx:]
+                    # Let user select target column
+                    target_column = st.sidebar.selectbox(
+                        "Select Target Column",
+                        df_uploaded.columns.tolist(),
+                        help="Select the column that contains your target variable (the value you want to predict)"
+                    )
+                    
+                    # Get feature columns (all except target)
+                    feature_columns = [col for col in df_uploaded.columns if col != target_column]
+                    
+                    # Validate feature columns
+                    numeric_features = df_uploaded[feature_columns].select_dtypes(include=[np.number]).columns.tolist()
+                    if len(numeric_features) == 0:
+                        st.sidebar.error("❌ No numeric feature columns found! Please ensure your CSV has at least one numeric feature column (excluding the target).")
+                    elif len(feature_columns) == 0:
+                        st.sidebar.error("❌ No feature columns found! Please ensure your CSV has at least one feature column (excluding the target).")
                     else:
-                        X_train, X_test, y_train, y_test = train_test_split(
-                            X, y, test_size=0.2, random_state=42
-                        )
-                        st.session_state.X_train = X_train
-                        st.session_state.X_test = X_test
-                        st.session_state.y_train = y_train
-                        st.session_state.y_test = y_test
-                    
-                    st.session_state.df = df_processed
-                    st.session_state.data_generated = True
-                    st.session_state.model = None
-                    st.session_state.uploaded_file = uploaded_file.name
-                    st.sidebar.success("✅ Data loaded successfully!")
+                        if len(numeric_features) < len(feature_columns):
+                            non_numeric = set(feature_columns) - set(numeric_features)
+                            st.sidebar.warning(f"⚠️ Warning: {len(non_numeric)} non-numeric feature(s) will be excluded: {', '.join(list(non_numeric)[:3])}{'...' if len(non_numeric) > 3 else ''}")
+                        
+                        if st.sidebar.button(" Load Uploaded Data", type="primary"):
+                            try:
+                                # Prepare data - use only numeric features
+                                X = df_uploaded[numeric_features].values
+                                y = df_uploaded[target_column].values
+                                
+                                # Validate target column
+                                if dataset_type == "Classification":
+                                    unique_values = np.unique(y)
+                                    if len(unique_values) < 2:
+                                        st.sidebar.error(f"❌ Classification requires at least 2 classes. Found only {len(unique_values)} unique value(s) in target column.")
+                                    elif len(unique_values) > 20:
+                                        st.sidebar.warning(f"⚠️ Warning: Target has {len(unique_values)} unique values. Consider if this should be a regression problem instead.")
+                                
+                                # Check for infinite values
+                                if np.any(np.isinf(X)) or np.any(np.isinf(y)):
+                                    st.sidebar.error("❌ Dataset contains infinite values! Please clean your data before uploading.")
+                                else:
+                                    # Create DataFrame with consistent structure
+                                    df_processed = df_uploaded.copy()
+                                    # Rename target column to 'Target' for consistency
+                                    df_processed = df_processed.rename(columns={target_column: 'Target'})
+                                    
+                                    # Split data
+                                    if dataset_type == "Time Series":
+                                        # For time series, use first 80% for training
+                                        if len(X) < 20:
+                                            st.sidebar.error("❌ Time series requires at least 20 samples. Current dataset has only {len(X)} samples.")
+                                        else:
+                                            split_idx = int(0.8 * len(X))
+                                            st.session_state.X_train = X[:split_idx]
+                                            st.session_state.X_test = X[split_idx:]
+                                            st.session_state.y_train = y[:split_idx]
+                                            st.session_state.y_test = y[split_idx:]
+                                            
+                                            st.session_state.df = df_processed
+                                            st.session_state.data_generated = True
+                                            st.session_state.model = None
+                                            st.session_state.uploaded_file = uploaded_file.name
+                                            st.sidebar.success("✅ Data loaded successfully!")
+                                    else:
+                                        if len(X) < 20:
+                                            st.sidebar.error(f"❌ Dataset too small! Requires at least 20 samples for train/test split. Current dataset has only {len(X)} samples.")
+                                        else:
+                                            X_train, X_test, y_train, y_test = train_test_split(
+                                                X, y, test_size=0.2, random_state=42
+                                            )
+                                            st.session_state.X_train = X_train
+                                            st.session_state.X_test = X_test
+                                            st.session_state.y_train = y_train
+                                            st.session_state.y_test = y_test
+                                            
+                                            st.session_state.df = df_processed
+                                            st.session_state.data_generated = True
+                                            st.session_state.model = None
+                                            st.session_state.uploaded_file = uploaded_file.name
+                                            st.sidebar.success("✅ Data loaded successfully!")
+                            except Exception as e:
+                                st.sidebar.error(f"❌ Error processing data: {str(e)}")
+                                st.sidebar.info("Please check that your target column contains valid numeric values for the selected problem type.")
+        except pd.errors.EmptyDataError:
+            st.sidebar.error("❌ CSV file is empty or improperly formatted! Please ensure your file contains data.")
+        except pd.errors.ParserError as e:
+            st.sidebar.error(f"❌ CSV parsing error: {str(e)}")
+            st.sidebar.info("Please ensure your CSV file is properly formatted with comma-separated values.")
+        except UnicodeDecodeError:
+            st.sidebar.error("❌ File encoding error! Please ensure your CSV file uses UTF-8 encoding.")
         except Exception as e:
             st.sidebar.error(f"❌ Error reading file: {str(e)}")
-            st.sidebar.info("Please ensure your CSV file is properly formatted.")
+            st.sidebar.info("Please ensure your CSV file is properly formatted and try again.")
 
 # Generate Data Button
-if data_source == "Generate Synthetic Data" and st.sidebar.button("🔄 Generate Synthetic Data", type="primary"):
+if data_source == "Generate Synthetic Data" and st.sidebar.button(" Generate Synthetic Data", type="primary"):
     with st.spinner("Generating synthetic data..."):
         if dataset_type == "Regression":
             st.session_state.df, X, y = generate_synthetic_data(
@@ -324,8 +439,8 @@ if data_source == "Generate Synthetic Data" and st.sidebar.button("🔄 Generate
 
 # Clear button in sidebar
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔄 Delete Option")
-if st.sidebar.button("🗑️ Clear All Data", help="Clear all data and models"):
+st.sidebar.subheader("Delete Option")
+if st.sidebar.button(" Clear All Data", help="Clear all data and models"):
     st.session_state.data_generated = False
     st.session_state.df = None
     st.session_state.X_train = None
@@ -346,10 +461,10 @@ if st.sidebar.button("🗑️ Clear All Data", help="Clear all data and models")
 # Main content
 if st.session_state.data_generated:
     # Tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Data Overview", "🔍 Exploratory Data Analysis", "🤖 Modeling", "🎯 Simulation & Evaluation"])
+    tab1, tab2, tab3, tab4 = st.tabs([" Data Overview", "Exploratory Data Analysis", " Modeling", "Simulation & Evaluation"])
     
     with tab1:
-        st.header("📈 Dataset Overview")
+        st.header("Dataset Overview")
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -377,7 +492,7 @@ if st.session_state.data_generated:
         st.dataframe(info_df, use_container_width=True)
         
         # Download CSV button
-        st.subheader("📥 Download Dataset")
+        st.subheader(" Download Dataset")
         csv = st.session_state.df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download Dataset as CSV",
@@ -420,10 +535,10 @@ if st.session_state.data_generated:
             )
     
     with tab2:
-        st.header("🔍 Exploratory Data Analysis")
+        st.header(" Exploratory Data Analysis")
         
         # Plot size controls
-        st.subheader("📐 Plot Size Controls")
+        st.subheader(" Plot Size Controls")
         col1, col2 = st.columns(2)
         with col1:
             plot_width = st.slider("Plot Width", 5, 20, st.session_state.plot_width, help="Adjust the width of plots")
@@ -511,12 +626,112 @@ if st.session_state.data_generated:
             ax.set_title('Time Series Data')
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
+        
+        # Advanced EDA Section
+        st.markdown("---")
+        st.subheader("Advanced EDA")
+        
+        # Box plots
+        st.subheader("Box Plots - Feature Distributions")
+        feature_cols = [col for col in st.session_state.df.columns if col != 'Target']
+        n_features = len(feature_cols)
+        n_cols = 3
+        n_rows = (n_features + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(st.session_state.plot_width * n_cols, st.session_state.plot_height * n_rows))
+        axes = axes.flatten() if n_features > 1 else [axes]
+        
+        for i, col in enumerate(feature_cols):
+            axes[i].boxplot(st.session_state.df[col].dropna(), vert=True)
+            axes[i].set_title(f'{col} Box Plot')
+            axes[i].set_ylabel('Value')
+            axes[i].grid(True, alpha=0.3, axis='y')
+        
+        for i in range(n_features, len(axes)):
+            axes[i].axis('off')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        # Pair plots (for smaller datasets)
+        if n_features <= 5:
+            st.subheader("Pair Plot - Feature Relationships")
+            numeric_cols = st.session_state.df.select_dtypes(include=[np.number]).columns.tolist()
+            if len(numeric_cols) > 1:
+                pair_df = st.session_state.df[numeric_cols]
+                fig = sns.pairplot(pair_df, diag_kind='hist', corner=False)
+                fig.fig.set_size_inches(st.session_state.plot_width * 1.5, st.session_state.plot_height * 1.5)
+                st.pyplot(fig.fig)
+            else:
+                st.info("Pair plots require at least 2 numeric features.")
+        else:
+            st.info(f"Pair plots are available for datasets with ≤5 features. Current dataset has {n_features} features.")
+        
+        # Outlier detection
+        st.subheader("Outlier Detection")
+        outlier_method = st.selectbox(
+            "Outlier Detection Method",
+            ["IQR Method (Interquartile Range)", "Z-Score Method"],
+            help="IQR: Uses 1.5*IQR rule. Z-Score: Uses standard deviations from mean."
+        )
+        
+        outlier_summary = []
+        for col in feature_cols:
+            if st.session_state.df[col].dtype in [np.number]:
+                if outlier_method == "IQR Method (Interquartile Range)":
+                    outliers, lower_bound, upper_bound = detect_outliers_iqr(st.session_state.df, col)
+                    n_outliers = len(outliers)
+                    outlier_pct = (n_outliers / len(st.session_state.df)) * 100
+                else:  # Z-Score method
+                    z_scores = np.abs(stats.zscore(st.session_state.df[col].dropna()))
+                    threshold = 3
+                    n_outliers = np.sum(z_scores > threshold)
+                    outlier_pct = (n_outliers / len(st.session_state.df[col].dropna())) * 100
+                
+                outlier_summary.append({
+                    'Feature': col,
+                    'Outliers': n_outliers,
+                    'Percentage': f"{outlier_pct:.2f}%"
+                })
+        
+        if outlier_summary:
+            outlier_df = pd.DataFrame(outlier_summary)
+            st.dataframe(outlier_df, use_container_width=True)
+            
+            # Visualize outliers for selected feature
+            selected_feature = st.selectbox("Select feature to visualize outliers", feature_cols)
+            if st.session_state.df[selected_feature].dtype in [np.number]:
+                fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
+                
+                if outlier_method == "IQR Method (Interquartile Range)":
+                    outliers, lower_bound, upper_bound = detect_outliers_iqr(st.session_state.df, selected_feature)
+                    ax.scatter(st.session_state.df.index, st.session_state.df[selected_feature], alpha=0.5, label='Data')
+                    if len(outliers) > 0:
+                        ax.scatter(outliers.index, outliers[selected_feature], color='red', marker='x', s=100, label='Outliers')
+                    ax.axhline(y=lower_bound, color='r', linestyle='--', alpha=0.5, label=f'Lower bound: {lower_bound:.2f}')
+                    ax.axhline(y=upper_bound, color='r', linestyle='--', alpha=0.5, label=f'Upper bound: {upper_bound:.2f}')
+                else:  # Z-Score
+                    z_scores = np.abs(stats.zscore(st.session_state.df[selected_feature].dropna()))
+                    threshold = 3
+                    outlier_indices = st.session_state.df[selected_feature].dropna().index[z_scores > threshold]
+                    ax.scatter(st.session_state.df.index, st.session_state.df[selected_feature], alpha=0.5, label='Data')
+                    if len(outlier_indices) > 0:
+                        ax.scatter(outlier_indices, st.session_state.df.loc[outlier_indices, selected_feature], 
+                                 color='red', marker='x', s=100, label='Outliers')
+                
+                ax.set_xlabel('Index')
+                ax.set_ylabel(selected_feature)
+                ax.set_title(f'Outlier Detection: {selected_feature}')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig)
     
     with tab3:
-        st.header("🤖 Model Training")
+        st.header(" Model Training")
         
         # Cross-validation option
-        st.subheader("⚙️ Training Options")
+        st.subheader("Training Options")
         use_cv = st.checkbox("Use Cross-Validation", value=st.session_state.use_cross_validation, 
                             help="Enable cross-validation for more robust model evaluation")
         st.session_state.use_cross_validation = use_cv
@@ -574,85 +789,104 @@ if st.session_state.data_generated:
             n_estimators = st.slider("Number of Trees", 10, 500, 100, help="More trees = better performance but slower training")
             max_depth = st.slider("Max Depth", 2, 20, 10, help="Maximum depth of the trees")
         
-        if st.button("🚀 Train Model(s)", type="primary"):
-            # Scale features
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(st.session_state.X_train)
-            X_test_scaled = scaler.transform(st.session_state.X_test)
-            
-            # Clear previous models if comparing
-            if compare_models:
-                st.session_state.models = {}
-            
-            # Train each selected model
-            for model_name in selected_models:
-                with st.spinner(f"Training {model_name}..."):
-                    if model_name == "Linear Regression":
-                        model = LinearRegression()
-                        model_type = "regression"
-                        model.fit(X_train_scaled, st.session_state.y_train)
+        if st.button(" Train Model(s)", type="primary"):
+            # Validation checks
+            if len(selected_models) == 0:
+                st.error("❌ Please select at least one model to train.")
+            elif st.session_state.X_train is None or len(st.session_state.X_train) == 0:
+                st.error("❌ No training data available! Please generate or upload data first.")
+            elif len(st.session_state.X_train) < 10:
+                st.warning(f"⚠️ Warning: Training set has only {len(st.session_state.X_train)} samples. Model performance may be poor with such a small dataset.")
+            else:
+                try:
+                    # Scale features
+                    scaler = StandardScaler()
+                    X_train_scaled = scaler.fit_transform(st.session_state.X_train)
+                    X_test_scaled = scaler.transform(st.session_state.X_test)
+                    
+                    # Check for NaN or Inf after scaling
+                    if np.any(np.isnan(X_train_scaled)) or np.any(np.isinf(X_train_scaled)):
+                        st.error("❌ Data contains NaN or infinite values after scaling. Please check your input data.")
+                    else:
+                        # Clear previous models if comparing
+                        if compare_models:
+                            st.session_state.models = {}
                         
-                    elif model_name == "Random Forest Regressor":
-                        model_type = "regression"
-                        progress_container = st.container()
-                        base_model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-                        rf_model = RandomForestWithProgress(base_model, progress_container)
-                        rf_model.fit(X_train_scaled, st.session_state.y_train)
-                        model = rf_model.base_model
-                        
-                    elif model_name == "Logistic Regression":
-                        model = LogisticRegression(random_state=42, max_iter=1000)
-                        model_type = "classification"
-                        model.fit(X_train_scaled, st.session_state.y_train)
-                        
-                    else:  # Random Forest Classifier
-                        model_type = "classification"
-                        progress_container = st.container()
-                        base_model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
-                        rf_model = RandomForestWithProgress(base_model, progress_container)
-                        rf_model.fit(X_train_scaled, st.session_state.y_train)
-                        model = rf_model.base_model
-                    
-                    # Make predictions
-                    y_train_pred = model.predict(X_train_scaled)
-                    y_test_pred = model.predict(X_test_scaled)
-                    
-                    # Cross-validation if enabled
-                    cv_scores = None
-                    if use_cv:
-                        if model_type == "regression":
-                            scoring = 'neg_mean_squared_error'
-                        else:
-                            scoring = 'accuracy'
-                        cv_scores = cross_val_score(model, X_train_scaled, st.session_state.y_train, 
-                                                   cv=cv_folds, scoring=scoring)
-                    
-                    # Store model info
-                    model_info = {
-                        'model': model,
-                        'model_type': model_type,
-                        'y_train_pred': y_train_pred,
-                        'y_test_pred': y_test_pred,
-                        'cv_scores': cv_scores
-                    }
-                    st.session_state.models[model_name] = model_info
-                    
-                    # Set primary model (first one or single model)
-                    if len(st.session_state.models) == 1:
-                        st.session_state.model = model
-                        st.session_state.model_type = model_type
-                        st.session_state.scaler = scaler
-                        st.session_state.y_train_pred = y_train_pred
-                        st.session_state.y_test_pred = y_test_pred
-                        st.session_state.cv_scores = cv_scores
+                        # Train each selected model
+                        for model_name in selected_models:
+                            with st.spinner(f"Training {model_name}..."):
+                                if model_name == "Linear Regression":
+                                    model = LinearRegression()
+                                    model_type = "regression"
+                                    model.fit(X_train_scaled, st.session_state.y_train)
+                                    
+                                elif model_name == "Random Forest Regressor":
+                                    model_type = "regression"
+                                    progress_container = st.container()
+                                    base_model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                                    rf_model = RandomForestWithProgress(base_model, progress_container)
+                                    rf_model.fit(X_train_scaled, st.session_state.y_train)
+                                    model = rf_model.base_model
+                                    
+                                elif model_name == "Logistic Regression":
+                                    model = LogisticRegression(random_state=42, max_iter=1000)
+                                    model_type = "classification"
+                                    model.fit(X_train_scaled, st.session_state.y_train)
+                                    
+                                else:  # Random Forest Classifier
+                                    model_type = "classification"
+                                    progress_container = st.container()
+                                    base_model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=42)
+                                    rf_model = RandomForestWithProgress(base_model, progress_container)
+                                    rf_model.fit(X_train_scaled, st.session_state.y_train)
+                                    model = rf_model.base_model
+                                
+                                # Make predictions
+                                y_train_pred = model.predict(X_train_scaled)
+                                y_test_pred = model.predict(X_test_scaled)
+                                
+                                # Cross-validation if enabled
+                                cv_scores = None
+                                if use_cv:
+                                    if model_type == "regression":
+                                        scoring = 'neg_mean_squared_error'
+                                    else:
+                                        scoring = 'accuracy'
+                                    cv_scores = cross_val_score(model, X_train_scaled, st.session_state.y_train, 
+                                                               cv=cv_folds, scoring=scoring)
+                                
+                                # Store model info
+                                model_info = {
+                                    'model': model,
+                                    'model_type': model_type,
+                                    'y_train_pred': y_train_pred,
+                                    'y_test_pred': y_test_pred,
+                                    'cv_scores': cv_scores
+                                }
+                                st.session_state.models[model_name] = model_info
+                                
+                                # Set primary model (first one or single model)
+                                if len(st.session_state.models) == 1:
+                                    st.session_state.model = model
+                                    st.session_state.model_type = model_type
+                                    st.session_state.scaler = scaler
+                                    st.session_state.y_train_pred = y_train_pred
+                                    st.session_state.y_test_pred = y_test_pred
+                                    st.session_state.cv_scores = cv_scores
             
-            st.success(f"✅ {len(selected_models)} model(s) trained successfully!")
+                        st.success(f"✅ {len(selected_models)} model(s) trained successfully!")
+                except ValueError as e:
+                    st.error(f"❌ Data validation error: {str(e)}")
+                    st.info("Please check that your data is properly formatted and contains valid numeric values.")
+                except Exception as e:
+                    st.error(f"❌ Error during model training: {str(e)}")
+                    st.info("Please check your data and model parameters, then try again.")
         
         # Display results
         if len(st.session_state.models) > 0:
             # Model comparison table if multiple models
             if compare_models and len(st.session_state.models) > 1:
-                st.subheader("📊 Model Comparison")
+                st.subheader("Model Comparison")
                 comparison_data = []
                 
                 for model_name, model_info in st.session_state.models.items():
@@ -716,17 +950,17 @@ if st.session_state.data_generated:
             
             # Cross-validation results
             if use_cv and st.session_state.cv_scores is not None:
-                st.subheader("📈 Cross-Validation Results")
+                st.subheader("Cross-Validation Results")
                 cv_mean = st.session_state.cv_scores.mean()
                 cv_std = st.session_state.cv_scores.std()
                 
                 if st.session_state.model_type == "regression":
-                    st.metric("CV MSE (mean)", f"{-cv_mean:.4f}", help="Mean squared error across CV folds")
-                    st.metric("CV MSE (std)", f"{cv_std:.4f}", help="Standard deviation of MSE across CV folds")
-                    st.metric("CV RMSE (mean)", f"{np.sqrt(-cv_mean):.4f}", help="Root mean squared error")
+                    st.metric("CV MSE (mean)", f"{-cv_mean:.4f}", help=get_metric_explanation("CV MSE", "regression"))
+                    st.metric("CV MSE (std)", f"{cv_std:.4f}", help="Standard deviation of MSE across CV folds. Lower = more consistent performance.")
+                    st.metric("CV RMSE (mean)", f"{np.sqrt(-cv_mean):.4f}", help=get_metric_explanation("CV RMSE", "regression"))
                 else:
-                    st.metric("CV Accuracy (mean)", f"{cv_mean:.4f}", help="Mean accuracy across CV folds")
-                    st.metric("CV Accuracy (std)", f"{cv_std:.4f}", help="Standard deviation of accuracy across CV folds")
+                    st.metric("CV Accuracy (mean)", f"{cv_mean:.4f}", help=get_metric_explanation("CV Accuracy", "classification"))
+                    st.metric("CV Accuracy (std)", f"{cv_std:.4f}", help="Standard deviation of accuracy across CV folds. Lower = more consistent performance.")
                 
                 # CV scores visualization
                 fig, ax = plt.subplots(figsize=(st.session_state.plot_width, st.session_state.plot_height))
@@ -758,13 +992,13 @@ if st.session_state.data_generated:
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Train MSE", f"{train_mse:.4f}")
+                    st.metric("Train MSE", f"{train_mse:.4f}", help=get_metric_explanation("MSE", "regression"))
                 with col2:
-                    st.metric("Test MSE", f"{test_mse:.4f}")
+                    st.metric("Test MSE", f"{test_mse:.4f}", help=get_metric_explanation("MSE", "regression"))
                 with col3:
-                    st.metric("Train R²", f"{train_r2:.4f}")
+                    st.metric("Train R²", f"{train_r2:.4f}", help=get_metric_explanation("R²", "regression"))
                 with col4:
-                    st.metric("Test R²", f"{test_r2:.4f}")
+                    st.metric("Test R²", f"{test_r2:.4f}", help=get_metric_explanation("R²", "regression"))
                 
                 # Additional metrics
                 train_mae = mean_absolute_error(st.session_state.y_train, st.session_state.y_train_pred)
@@ -775,13 +1009,13 @@ if st.session_state.data_generated:
                 st.subheader("Additional Regression Metrics")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Train MAE", f"{train_mae:.4f}")
+                    st.metric("Train MAE", f"{train_mae:.4f}", help=get_metric_explanation("MAE", "regression"))
                 with col2:
-                    st.metric("Test MAE", f"{test_mae:.4f}")
+                    st.metric("Test MAE", f"{test_mae:.4f}", help=get_metric_explanation("MAE", "regression"))
                 with col3:
-                    st.metric("Train RMSE", f"{train_rmse:.4f}")
+                    st.metric("Train RMSE", f"{train_rmse:.4f}", help=get_metric_explanation("RMSE", "regression"))
                 with col4:
-                    st.metric("Test RMSE", f"{test_rmse:.4f}")
+                    st.metric("Test RMSE", f"{test_rmse:.4f}", help=get_metric_explanation("RMSE", "regression"))
                 
                 # Prediction vs Actual plots
                 st.subheader("Prediction vs Actual")
@@ -808,7 +1042,7 @@ if st.session_state.data_generated:
                 
                 # Feature importance for tree-based models
                 if "Random Forest" in primary_model_name:
-                    st.subheader("📊 Feature Importance")
+                    st.subheader("Feature Importance")
                     try:
                         feature_importance = st.session_state.model.feature_importances_
                         # Get feature names
@@ -857,15 +1091,15 @@ if st.session_state.data_generated:
                 st.subheader("Classification Metrics")
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Train Accuracy", f"{train_acc:.4f}")
-                    st.metric("Train Precision", f"{train_precision:.4f}")
-                    st.metric("Train Recall", f"{train_recall:.4f}")
-                    st.metric("Train F1-Score", f"{train_f1:.4f}")
+                    st.metric("Train Accuracy", f"{train_acc:.4f}", help=get_metric_explanation("Accuracy", "classification"))
+                    st.metric("Train Precision", f"{train_precision:.4f}", help=get_metric_explanation("Precision", "classification"))
+                    st.metric("Train Recall", f"{train_recall:.4f}", help=get_metric_explanation("Recall", "classification"))
+                    st.metric("Train F1-Score", f"{train_f1:.4f}", help=get_metric_explanation("F1-Score", "classification"))
                 with col2:
-                    st.metric("Test Accuracy", f"{test_acc:.4f}")
-                    st.metric("Test Precision", f"{test_precision:.4f}")
-                    st.metric("Test Recall", f"{test_recall:.4f}")
-                    st.metric("Test F1-Score", f"{test_f1:.4f}")
+                    st.metric("Test Accuracy", f"{test_acc:.4f}", help=get_metric_explanation("Accuracy", "classification"))
+                    st.metric("Test Precision", f"{test_precision:.4f}", help=get_metric_explanation("Precision", "classification"))
+                    st.metric("Test Recall", f"{test_recall:.4f}", help=get_metric_explanation("Recall", "classification"))
+                    st.metric("Test F1-Score", f"{test_f1:.4f}", help=get_metric_explanation("F1-Score", "classification"))
                 
                 # Confusion matrix
                 st.subheader("Confusion Matrix")
@@ -885,7 +1119,7 @@ if st.session_state.data_generated:
                 
                 # Feature importance for tree-based models
                 if "Random Forest" in primary_model_name:
-                    st.subheader("📊 Feature Importance")
+                    st.subheader("Feature Importance")
                     try:
                         feature_importance = st.session_state.model.feature_importances_
                         # Get feature names
@@ -917,16 +1151,16 @@ if st.session_state.data_generated:
                         st.warning(f"Could not display feature importance: {str(e)}")
     
     with tab4:
-        st.header("🎯 Simulation & Evaluation")
+        st.header("Simulation & Evaluation")
         
         if st.session_state.model is None:
-            st.warning("⚠️ Please train a model first in the Modeling tab.")
+            st.warning(" Please train a model first in the Modeling tab.")
         else:
             st.subheader("Generate Simulated Outcomes")
             
             n_simulations = st.slider("Number of Simulations", 10, 1000, 100)
             
-            if st.button("🎲 Generate Simulations", type="primary"):
+            if st.button(" Generate Simulations", type="primary"):
                 with st.spinner("Generating simulations..."):
                     # Generate new synthetic data with same properties
                     if data_source == "Upload CSV File":
@@ -1065,7 +1299,7 @@ if st.session_state.data_generated:
 
 else:
     if data_source == "Upload CSV File":
-        st.info("👈 Please upload a CSV file in the sidebar and select your target column to get started!")
+        st.info(" Please upload a CSV file in the sidebar and select your target column to get started!")
     else:
-        st.info("👈 Please configure the parameters in the sidebar and click 'Generate Synthetic Data' to get started!")
+        st.info(" Please configure the parameters in the sidebar and click 'Generate Synthetic Data' to get started!")
 
